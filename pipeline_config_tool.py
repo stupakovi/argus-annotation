@@ -10,6 +10,7 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -38,6 +39,58 @@ def _prompt_required(prompt_text: str) -> str:
         if value:
             return value
         print("Value cannot be empty. Please try again.")
+
+
+def _is_ascii_string(value: str) -> bool:
+    try:
+        value.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _prompt_ascii(prompt_text: str) -> str:
+    """Prompt until a non-empty ASCII-only value is provided."""
+    while True:
+        value = _prompt_required(prompt_text)
+        if _is_ascii_string(value):
+            return value
+        print("Value must contain ASCII characters only. Please try again.")
+
+
+def _is_valid_gps_coordinates(value: str) -> bool:
+    """Validate GPS as two numeric values separated by comma."""
+    return bool(re.fullmatch(r"\s*[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?\s*", value))
+
+
+def _prompt_gps(prompt_text: str) -> str:
+    """Prompt until valid GPS coordinates are provided."""
+    while True:
+        value = _prompt_required(prompt_text)
+        if _is_valid_gps_coordinates(value):
+            return value
+        print("GPS must be two numeric values separated by comma (example: 41.340081, 69.250844).")
+
+
+def _sanitize_ascii_or_prompt(value: str, prompt_text: str) -> str:
+    """Use existing ASCII value if valid; otherwise ask interactively."""
+    sanitized = (value or "").strip()
+    if sanitized and _is_ascii_string(sanitized):
+        return sanitized
+    print(f"Invalid value for {prompt_text.strip(': ')}. Please enter a valid ASCII value.")
+    return _prompt_ascii(prompt_text)
+
+
+def _sanitize_gps_or_prompt(value: str, prompt_text: str) -> str:
+    """Use existing GPS value if valid; otherwise ask interactively."""
+    sanitized = (value or "").strip()
+    if _is_valid_gps_coordinates(sanitized):
+        return sanitized
+    print(
+        f"Invalid value for {prompt_text.strip(': ')}. "
+        "Please enter two numeric values separated by comma."
+    )
+    return _prompt_gps(prompt_text)
 
 
 def _read_pid(path: str):
@@ -289,6 +342,13 @@ def main():
                         direction = _prompt_required("direction: ")
                         gps_coordinates = _prompt_required("gps_coordinates: ")
 
+                    intersection_address = _sanitize_ascii_or_prompt(
+                        intersection_address,
+                        "crossroad_name (intersection_address): ",
+                    )
+                    direction = _sanitize_ascii_or_prompt(direction, "direction: ")
+                    gps_coordinates = _sanitize_gps_or_prompt(gps_coordinates, "gps_coordinates: ")
+
                     print(f"front_camera_ip:           {front_camera_ip}")
                     print(f"back_camera_ip:            {back_camera_ip}")
                     print(f"intersection_address:      {intersection_address}")
@@ -327,7 +387,7 @@ def main():
                         sys.exit(1)
 
                     image_suffix = f"cam_[IP]_{timestamp}.jpg"
-                    direction_arg = f"{back_camera_ip}|{front_camera_ip}|{direction}"
+                    direction_arg = f"{args.pipeline_number}|{back_camera_ip}|{front_camera_ip}|{direction}"
                     annotation_cmd = [
                         sys.executable,
                         "annotation_tool.py",
@@ -379,6 +439,13 @@ def main():
     direction = _prompt_required("direction: ")
     gps_coordinates = _prompt_required("gps_coordinates: ")
 
+    intersection_address = _sanitize_ascii_or_prompt(
+        intersection_address,
+        "crossroad_name (intersection_address): ",
+    )
+    direction = _sanitize_ascii_or_prompt(direction, "direction: ")
+    gps_coordinates = _sanitize_gps_or_prompt(gps_coordinates, "gps_coordinates: ")
+
     print(f"user:                      {user}")
     print(f"host_name:                 {host_name}")
     print(f"front_camera_ip:           {front_camera_ip}")
@@ -419,7 +486,7 @@ def main():
         sys.exit(1)
 
     image_suffix = f"cam_[IP]_{timestamp}.jpg"
-    direction_arg = f"{back_camera_ip}|{front_camera_ip}|{direction}"
+    direction_arg = f"{args.pipeline_number}|{back_camera_ip}|{front_camera_ip}|{direction}"
     annotation_cmd = [
         sys.executable,
         "annotation_tool.py",

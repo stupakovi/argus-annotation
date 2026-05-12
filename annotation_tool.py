@@ -637,12 +637,19 @@ def main():
     args = parser.parse_args()
 
     deployment_maps = []
-    direction_id = 1
     for direction in args.directions:
         splited_string = direction.split('|')
-        back_ip = splited_string[0]
-        front_ip = splited_string[1]
-        direction_name = splited_string[2]
+        if len(splited_string) < 4:
+            print(
+                "Error: Each direction must be in format "
+                "direction_id|back_ip|front_ip|direction_name"
+            )
+            return
+
+        direction_id = splited_string[0]
+        back_ip = splited_string[1]
+        front_ip = splited_string[2]
+        direction_name = "|".join(splited_string[3:])
         back_image = args.images_path + "\\" + args.login + "@" + args.ip + "\\" + args.image_suffix.replace("[IP]", back_ip.replace(".", "_"))
         front_image = args.images_path + "\\" + args.login + "@" + args.ip + "\\" + args.image_suffix.replace("[IP]", front_ip.replace(".", "_"))
 
@@ -662,8 +669,6 @@ def main():
         deployment_map = ",".join([init_args.p_config_name, init_args.name, init_args.device_id, args.login, args.ip, str(direction_id)])
         _main_internal(init_args)
         deployment_maps.append(deployment_map)
-        
-        direction_id = direction_id + 1
 
     for deployment_map in deployment_maps:
         print(deployment_map)
