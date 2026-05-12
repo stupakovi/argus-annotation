@@ -1,0 +1,11 @@
+[project]
+name = "argus-annotation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy==1.26.4",
+    "opencv-python==4.11.0.86",
+    "pyyaml==6.0.1",
+]

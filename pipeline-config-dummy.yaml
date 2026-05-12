@@ -1,0 +1,211 @@
+# ==============================
+# Display / Annotation
+# ==============================
+display:
+  car_bbox_color: [0, 255, 255]
+  plate_bbox_color: [0, 255, 0]
+
+# ==============================
+# Tracking & Batching
+# ==============================
+tracking:
+  inactive_ttl_frames: 150
+  vehicle_classes: [2, 5, 7] # car, bus, truck (removed motorcycle)
+  detect_violations_classes: [2, 5, 7] # car, bus, truck
+  topk_vehicle_candidates: 10
+  crop_margin: 70
+  batch_frames: 25
+  track_activation_threshold: 0.25
+  lost_track_buffer: 25
+  minimum_matching_threshold: 0.7
+  frame_rate: 25
+  minimum_consecutive_frames: 1
+  min_detections_to_finalize: 15
+
+# ==============================
+# Car Reference Margins (%)
+# ==============================
+car_reference_margins:
+  car_to_first_width_margin: 0.35
+  car_to_first_height_margin: 0.90
+  car_to_second_width_margin: 0.5
+  car_to_second_height_margin: 0.5
+  car_from_first_width_margin: 0.5
+  car_from_first_height_margin: 0.90
+  car_from_second_width_margin: 0.5
+  car_from_second_height_margin: 0.5
+
+# ==============================
+# Traffic Light Colors
+# ==============================
+traffic_light:
+  max_green_gap_frames: 30
+  colors:
+    red: "red"
+    yellow: "yellow"
+    green: "green"
+
+# ==============================
+# Finalization / Ray
+# ==============================
+finalize:
+  backend: "ray"
+  max_pending: 128
+  ray_spill_dir: "/tmp/ray_spill"
+
+# ==============================
+# I/O & Preview
+# ==============================
+io:
+  input_video_path: "rtsp://admin:DOM2588205@<FRONT_CAMERA>:554/cam/realmonitor?channel=1&subtype=0"
+  input_traffic_light_video_path: "rtsp://admin:DOM2588205@<BACK_CAMERA>:554/cam/realmonitor?channel=1&subtype=0"
+  camera_config_path: "configs/<CAMERA_CONFIGS>"
+  output_dir: "output-dir"
+  per_frame_log_name: "per_frame_log.csv"
+  final_objects_name: "final_objects.csv"
+  final_json_name: "final_objects.json"
+  violations_name: "violations.csv"
+  violations_filtered_name: "violations_filtered.csv"
+  traffic_light_log_name: "traffic_light_log.csv"
+  speeds_json_name: "speeds.jsonl"
+  has_passed_line_history_json_name: "has_passed_line_history.jsonl"
+  images_dir: "objects"
+  use_structured_folders: false
+  frame_queue_max_size: 250
+  stream_queue_max_size: 25
+  pre_buffer_seconds: 5
+  days_to_store_runs: 7
+
+# ==============================
+# OCR
+# ==============================
+ocr:
+  url: "http://argus-paddle:8008/recognize"
+  http_timeout: 8.0
+
+# ==============================
+# Models & Thresholds
+# ==============================
+models:
+  car_detection:
+    path: "models/yolo11s.pt"
+    conf: 0.25
+    iou: 0.7
+    imgsz: 640
+  plate_detection:
+    path: "models/license-plate-finetune-v1n.pt"
+    conf: 0.25
+  tl_classification:
+    path: "models/tl_classifier_small_new.pt"
+    conf: 0.7
+    green_threshold: 0.1
+    crop_threshold: 0.3
+    model_variant: "small"
+
+# ==============================
+# RTSP Reconnects
+# ==============================
+rtsp:
+  reconnect_retries: 20
+  reconnect_sleep: 1.0
+
+# ==============================
+# Tracking persistence
+# ==============================
+max_last_seen_frames: 75
+
+ftp:
+  delete_local_files_on_upload: false
+
+fixation:
+  device_id: "<DEVICE_ID>"
+  intersection_address: "<CROSSROAD_NAME>"
+  camera_name: "TRAFIC-SKANER-K2 <DEVICE_ID>"
+  direction: "<STREET_NAME>"
+  direction_code: 1
+  timezone: "+05:00"
+  device_serial: "<DEVICE_ID>"
+  gps_coordinates: "(<GPS>)"
+  font_path: "DejaVuSans.ttf"
+  car_crop_font_size: 15
+  car_crop_line_height: 20
+  car_crop_top_padding: 10
+  car_crop_side_padding: 10
+  car_crop_target_width: 800
+  scene_font_size: 25
+  scene_line_height: 30
+  scene_top_padding: 20
+  scene_side_padding: 20
+  font_color: "white"
+  bar_height: 86
+  line1_y_pos_from_top: 15
+  line2_y_pos_from_top: 50
+  scene_resolution: [1280, 720]
+  clip_output_resolution: [1280, 720]
+  collage:
+    cell_width: 640
+    cell_height: 360
+    border_width: 3
+    border_color: "white"
+    text_color: "white"
+    timestamp_bar_height: 30
+    footer_line_height: 30
+    traffic_light_width: 80
+    traffic_light_margin: 5
+    car_bbox_vertical_margin_pct: 10
+    license_plate_annotation_color: "red"
+    license_plate_annotation_width_scene: 2
+    license_plate_annotation_width_crop: 2
+    license_plate_margin_pct: 10
+    stop_line_annotation_color: "red"
+    stop_line_annotation_width: 6
+    car_bbox_annotation_color: "green"
+    car_bbox_annotation_width: 3
+    timestamp_font_size: 22
+    footer_font_size: 22
+    background_fill_color: "black"
+    timestamp_text: "Kadr olingan vaqt"
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    speed_text: "Avtomobil tezligi"
+    speed_measurement_unit: "km/s"
+    allowed_speed_text: "Ruxsat etilgan tezlik (engil\\yuk avtom..\\avtobus)"
+    violation_texts:
+      "Stop Line Violation": "Svetaforning taqiqlovchi chirog'ida yo'lning qatnov qismidagi yo'l chiziqlarini yoki yo'l belgilari bilan belgilangan to'xtash chizig'ini bosib kirish"
+      "Crossroad Violation": "Svetaforning taqiqlovchi chirog'iga bo'ysunmasdan o'tish"
+      "Solid Line Violation": "Yo'lning qarama-qarshi harakatlanish uchun mo'ljallangan tomoniga yoki bo'lagiga chiqish"
+    speeding_violation_texts:
+      1: "Tezlik chegarasidan 20 km/s oshirish"
+      2: "Tezlik chegarasidan 20 km/s ortiq, lekin 40 km/s kam oshirish"
+      3: "Tezlik chegarasidan 40 km/s ortiq, lekin 60 km/s kam oshirish"
+      4: "Tezlik chegarasidan 60 km/s oshirish"
+    time_text: "Vaqti"
+    direction_text: "Yo'nalish"
+    camera_name_text: "Kompleks"
+    gps_coordinates_text: "GPS Koordinatalar"
+    intersection_address_text: "O'rnatish joyi"
+    image_save_quality: 95
+
+video_buffer:
+  buffer_duration_minutes: 20
+  segment_duration_seconds: 1
+  resize_dimensions: [1280, 720]
+  frontview_dir: "video_buffer_frontview"
+  backview_dir: "video_buffer_backview"
+  queue_size: 100
+
+monitoring:
+  device_name: "Pipeline {MONITOR_NUMBER}"
+  system_monitor_interval_seconds: 15
+  business_monitor_interval_seconds: 30
+  system_monitor_endpoint: "http://172.18.12.9:8012/api/system-status"
+  statistics_monitor_endpoint: "http://172.18.12.9:8012/api/statistics"
+  alert_monitor_endpoint: "http://172.18.12.9:8012/api/alerts"
+  violation_alert_threshold: 4
+  restart_frequency_window_seconds: 90
+  ray_error_alert_cooldown_seconds: 300
+
+
+camera_movement:
+  enabled: false
+  threshold_pixels: 10
+  save_debug_frames: false
