@@ -7,5 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy==1.26.4",
     "opencv-python==4.11.0.86",
+    "paramiko<4",
     "pyyaml==6.0.1",
+    "sshtunnel==0.4.0",
 ]

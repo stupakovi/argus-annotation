@@ -4,10 +4,15 @@ Lookup a deployment map record by device_id and pipeline_number,
 and manage the SSH port-forwarding tunnel for its cameras.
 
 Usage:
-    python pipeline_config_tool.py <device_id> <pipeline_number> [--action info|start|stop|status]
+    python pipeline_config_tool.py <device_id> <pipeline_number> --password <ssh_password>
+    
+Requirements:
+    - paramiko: Install with `pip install paramiko`
+    - sshtunnel: Install with `pip install sshtunnel`
 """
 
 import argparse
+import atexit
 import csv
 import os
 import re
@@ -21,8 +26,32 @@ from urllib.parse import urlparse
 
 import cv2
 import yaml
+from sshtunnel import SSHTunnelForwarder
+
+# Global dictionary to store active SSH tunnels
+_active_tunnels = {}
+
+
+def _cleanup_tunnels():
+    """Cleanup all active tunnels on exit."""
+    for key, tunnel in list(_active_tunnels.items()):
+        try:
+            if tunnel.is_active:
+                tunnel.stop()
+                print(f"Closed tunnel: {key}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error closing tunnel {key}: {e}", file=sys.stderr)
+    _active_tunnels.clear()
+
+
+# Register cleanup handler
+atexit.register(_cleanup_tunnels)
 
 CONFIG_BASE_PATH = r"C:\git\64bit\argus-config"
+CONFIGS_PATH = CONFIG_BASE_PATH + r"\configs"
+DEPLOYMENT_MAP_PATH = CONFIG_BASE_PATH + r"\deployment_map.csv"
+PID_DIR = CONFIG_BASE_PATH + r"\pids"
+CAMERA_FRAME_BASE_PATH = r"C:\temp\64bit\devices"
 CONFIGS_PATH = CONFIG_BASE_PATH + r"\configs"
 DEPLOYMENT_MAP_PATH = CONFIG_BASE_PATH + r"\deployment_map.csv"
 PID_DIR = CONFIG_BASE_PATH + r"\pids"
@@ -166,18 +195,82 @@ def _is_running(pid: int) -> bool:
         return False
 
 
-def _start_tunnel(ssh_cmd: list, device_id: str, pipeline_number: int) -> None:
-    pf = _pid_file(device_id, pipeline_number)
-    existing = _read_pid(pf)
-    if existing and _is_running(existing):
-        print(f"Tunnel already running (PID {existing})")
-        return
+def _start_tunnel(host: str, user: str, password: str, back_camera_ip: str, device_id: str, pipeline_number: int) -> None:
+    """
+    Start SSH tunnel for port forwarding using sshtunnel.
+    Maps local port 18601 to remote back camera IP.
+    """
+    tunnel_key = f"{device_id}-{pipeline_number}"
+    
+    # Check if tunnel already exists and is active
+    if tunnel_key in _active_tunnels:
+        tunnel = _active_tunnels[tunnel_key]
+        if tunnel.is_active:
+            print(f"Tunnel already running for {tunnel_key}")
+            return
+        else:
+            # Clean up dead tunnel
+            del _active_tunnels[tunnel_key]
+    
     os.makedirs(PID_DIR, exist_ok=True)
-    # Don't capture stdin/stdout/stderr to allow interactive password entry
-    proc = subprocess.Popen(ssh_cmd, stdin=None, stdout=None, stderr=None)
-    with open(pf, "w") as f:
-        f.write(str(proc.pid))
-    print(f"Tunnel started (PID {proc.pid})")
+    
+    try:
+        # Create SSH tunnel with port forwarding
+        tunnel = SSHTunnelForwarder(
+            (host, 22),
+            ssh_username=user,
+            ssh_password=password,
+            remote_bind_address=(back_camera_ip, 554),
+            local_bind_address=("127.0.0.1", 18601),
+            allow_agent=False,
+            set_keepalive=5.0,
+        )
+        tunnel.start()
+        _active_tunnels[tunnel_key] = tunnel
+        
+        # Save PID file for backwards compatibility
+        pid_file_path = _pid_file(device_id, pipeline_number)
+        with open(pid_file_path, "w") as f:
+            f.write(str(os.getpid()))
+        
+        print(f"Tunnel started for {tunnel_key} on local port 18601")
+        
+    except Exception as e:
+        print(f"Failed to start tunnel: {e}", file=sys.stderr)
+        raise
+
+
+def _start_second_tunnel(host: str, user: str, password: str, front_camera_ip: str, device_id: str, pipeline_number: int) -> None:
+    """
+    Start second SSH tunnel for front camera on port 18602.
+    """
+    tunnel_key_front = f"{device_id}-{pipeline_number}-front"
+    
+    if tunnel_key_front in _active_tunnels:
+        tunnel = _active_tunnels[tunnel_key_front]
+        if tunnel.is_active:
+            print(f"Front camera tunnel already running for {tunnel_key_front}")
+            return
+        else:
+            del _active_tunnels[tunnel_key_front]
+    
+    try:
+        tunnel = SSHTunnelForwarder(
+            (host, 22),
+            ssh_username=user,
+            ssh_password=password,
+            remote_bind_address=(front_camera_ip, 554),
+            local_bind_address=("127.0.0.1", 18602),
+            allow_agent=False,
+            set_keepalive=5.0,
+        )
+        tunnel.start()
+        _active_tunnels[tunnel_key_front] = tunnel
+        print(f"Tunnel started for {tunnel_key_front} on local port 18602")
+        
+    except Exception as e:
+        print(f"Failed to start front camera tunnel: {e}", file=sys.stderr)
+        raise
 
 
 def _wait_for_tunnel(timeout: int = 30) -> bool:
@@ -204,30 +297,65 @@ def _wait_for_tunnel(timeout: int = 30) -> bool:
 
 
 def _stop_tunnel(device_id: str, pipeline_number: int) -> None:
+    """Stop and close all tunnels for this device/pipeline."""
+    tunnel_key = f"{device_id}-{pipeline_number}"
+    tunnel_key_front = f"{device_id}-{pipeline_number}-front"
+    
+    for key in [tunnel_key, tunnel_key_front]:
+        if key in _active_tunnels:
+            try:
+                _active_tunnels[key].stop()
+                del _active_tunnels[key]
+                print(f"Tunnel stopped: {key}")
+            except Exception as e:
+                print(f"Error closing tunnel {key}: {e}", file=sys.stderr)
+    
+    # Clean up PID file
     pf = _pid_file(device_id, pipeline_number)
-    pid = _read_pid(pf)
-    if not pid:
-        print("Tunnel not running (no PID file found)")
-        return
-    subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
-    os.remove(pf)
-    print(f"Tunnel stopped (PID {pid})")
+    if os.path.isfile(pf):
+        try:
+            os.remove(pf)
+        except Exception:
+            pass
 
 
 def _tunnel_status(device_id: str, pipeline_number: int) -> None:
-    pf = _pid_file(device_id, pipeline_number)
-    pid = _read_pid(pf)
-    if not pid:
-        print("Tunnel: not running (no PID file)")
-        return
-    if _is_running(pid):
-        print(f"Tunnel: running (PID {pid})")
+    """Check tunnel status."""
+    tunnel_key = f"{device_id}-{pipeline_number}"
+    
+    if tunnel_key in _active_tunnels:
+        tunnel = _active_tunnels[tunnel_key]
+        if tunnel.is_active:
+            print(f"Tunnel: running ({tunnel_key})")
+        else:
+            print(f"Tunnel: not running ({tunnel_key})")
     else:
-        print(f"Tunnel: not running (stale PID {pid})")
-        os.remove(pf)
+        print(f"Tunnel: not running (no active tunnel for {tunnel_key})")
 
 
-def _capture_frames_from_forwarded_ports(back_camera_ip: str, front_camera_ip: str) -> tuple:
+def _rewrite_rtsp_url_for_tunnel(source_url: str, local_port: int, fallback_ip: str) -> str:
+    """Reuse configured RTSP URL, replacing only host/port with the local SSH tunnel."""
+    parsed = urlparse((source_url or "").strip())
+    if parsed.scheme:
+        credentials = ""
+        if parsed.username:
+            credentials = parsed.username
+            if parsed.password is not None:
+                credentials += f":{parsed.password}"
+            credentials += "@"
+        path = parsed.path or "/cam/realmonitor"
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{parsed.scheme}://{credentials}127.0.0.1:{local_port}{path}{query}"
+
+    return f"rtsp://admin:DOM2588205@127.0.0.1:{local_port}/cam/realmonitor?channel=1&subtype=0"
+
+
+def _capture_frames_from_forwarded_ports(
+    back_camera_ip: str,
+    front_camera_ip: str,
+    back_stream_url: str,
+    front_stream_url: str,
+) -> tuple:
     """
     Capture one frame from each forwarded port (18601=back, 18602=front).
     Returns (back_frame_path, front_frame_path) or (None, None) if capture fails.
@@ -242,7 +370,7 @@ def _capture_frames_from_forwarded_ports(back_camera_ip: str, front_camera_ip: s
     front_frame_path = os.path.join(temp_dir, f"cam_{front_camera_ip}_{timestamp}.jpg")
 
     # Capture from back camera (port 18601)
-    back_url = "rtsp://admin:DOM2588205@localhost:18601/cam/realmonitor?channel=1&subtype=0"
+    back_url = _rewrite_rtsp_url_for_tunnel(back_stream_url, 18601, back_camera_ip)
     print(f"Capturing frame from back camera: {back_url}")
     cap_back = cv2.VideoCapture(back_url)
     if cap_back.isOpened():
@@ -259,7 +387,7 @@ def _capture_frames_from_forwarded_ports(back_camera_ip: str, front_camera_ip: s
         back_frame_path = None
 
     # Capture from front camera (port 18602)
-    front_url = "rtsp://admin:DOM2588205@localhost:18602/cam/realmonitor?channel=1&subtype=0"
+    front_url = _rewrite_rtsp_url_for_tunnel(front_stream_url, 18602, front_camera_ip)
     print(f"Capturing frame from front camera: {front_url}")
     cap_front = cv2.VideoCapture(front_url)
     if cap_front.isOpened():
@@ -281,6 +409,8 @@ def _capture_frames_from_forwarded_ports(back_camera_ip: str, front_camera_ip: s
 def _capture_frames_to_folder(
     back_camera_ip: str,
     front_camera_ip: str,
+    back_stream_url: str,
+    front_stream_url: str,
     camera_frame_folder: str,
     user: str,
     host_name: str,
@@ -302,7 +432,7 @@ def _capture_frames_to_folder(
     back_frame_path = os.path.join(device_folder, f"cam_{back_ip_token}_{timestamp}.jpg")
     front_frame_path = os.path.join(device_folder, f"cam_{front_ip_token}_{timestamp}.jpg")
 
-    back_url = "rtsp://admin:DOM2588205@localhost:18601/cam/realmonitor?channel=1&subtype=0"
+    back_url = _rewrite_rtsp_url_for_tunnel(back_stream_url, 18601, back_camera_ip)
     print(f"Capturing frame from back camera: {back_url}")
     cap_back = cv2.VideoCapture(back_url)
     if cap_back.isOpened():
@@ -318,7 +448,7 @@ def _capture_frames_to_folder(
         print("Failed to open back camera stream", file=sys.stderr)
         back_frame_path = None
 
-    front_url = "rtsp://admin:DOM2588205@localhost:18602/cam/realmonitor?channel=1&subtype=0"
+    front_url = _rewrite_rtsp_url_for_tunnel(front_stream_url, 18602, front_camera_ip)
     print(f"Capturing frame from front camera: {front_url}")
     cap_front = cv2.VideoCapture(front_url)
     if cap_front.isOpened():
@@ -341,6 +471,7 @@ def main():
     parser = argparse.ArgumentParser(description="Look up a pipeline config record from deployment_map.csv")
     parser.add_argument("device_id", type=str, help="Device ID to search for")
     parser.add_argument("pipeline_number", type=int, help="Pipeline number to search for")
+    parser.add_argument("--password", type=str, required=True, help="SSH password for authentication")
     args = parser.parse_args()
 
     try:
@@ -391,6 +522,8 @@ def main():
                         print("Please provide values that are normally extracted from pipeline config.")
                         front_camera_ip = _prompt_required("front_camera_ip: ")
                         back_camera_ip = _prompt_required("back_camera_ip: ")
+                        front_url = f"rtsp://admin:DOM2588205@{front_camera_ip}:554/cam/realmonitor?channel=1&subtype=0"
+                        back_url = f"rtsp://admin:DOM2588205@{back_camera_ip}:554/cam/realmonitor?channel=1&subtype=0"
                         intersection_address = _prompt_required("crossroad_name (intersection_address): ")
                         direction = _prompt_required("direction: ")
                         gps_coordinates = _prompt_gps("gps_coordinates: ")
@@ -411,18 +544,10 @@ def main():
                     print(f"direction:                 {direction}")
                     print(f"gps_coordinates:           {gps_coordinates}")
 
-                    ssh_cmd = [
-                        "ssh", "-p", "22", "-NT",
-                        "-L", f"18601:{back_camera_ip}:554",
-                        "-L", f"18602:{front_camera_ip}:554",
-                        "-o", "ExitOnForwardFailure=yes",
-                        "-o", "ServerAliveInterval=30",
-                        "-o", "ServerAliveCountMax=3",
-                        f"{user}@{host_name}",
-                    ]
-                    print(f"ssh_command:               {' '.join(ssh_cmd)}")
-
-                    _start_tunnel(ssh_cmd, args.device_id, args.pipeline_number)
+                    print(f"Starting SSH tunnels to {host_name} for {user}...")
+                    _start_tunnel(host_name, user, args.password, back_camera_ip, args.device_id, args.pipeline_number)
+                    _start_second_tunnel(host_name, user, args.password, front_camera_ip, args.device_id, args.pipeline_number)
+                    
                     if not _wait_for_tunnel(timeout=30):
                         _stop_tunnel(args.device_id, args.pipeline_number)
                         print("Failed to establish tunnel", file=sys.stderr)
@@ -430,6 +555,8 @@ def main():
                     back_frame_path, front_frame_path, timestamp = _capture_frames_to_folder(
                         back_camera_ip,
                         front_camera_ip,
+                        back_url,
+                        front_url,
                         CAMERA_FRAME_BASE_PATH,
                         user,
                         host_name,
@@ -516,6 +643,8 @@ def main():
     # Always prompt for camera IPs and direction
     front_camera_ip = _prompt_required("front_camera_ip: ")
     back_camera_ip = _prompt_required("back_camera_ip: ")
+    front_url = f"rtsp://admin:DOM2588205@{front_camera_ip}:554/cam/realmonitor?channel=1&subtype=0"
+    back_url = f"rtsp://admin:DOM2588205@{back_camera_ip}:554/cam/realmonitor?channel=1&subtype=0"
     direction = _prompt_required("direction: ")
 
     direction = _sanitize_ascii_or_prompt(direction, "direction: ")
@@ -528,18 +657,10 @@ def main():
     print(f"direction:                 {direction}")
     print(f"gps_coordinates:           {gps_coordinates}")
 
-    ssh_cmd = [
-        "ssh", "-p", "22", "-NT",
-        "-L", f"18601:{back_camera_ip}:554",
-        "-L", f"18602:{front_camera_ip}:554",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        f"{user}@{host_name}",
-    ]
-    print(f"ssh_command:               {' '.join(ssh_cmd)}")
+    print(f"Starting SSH tunnels to {host_name} for {user}...")
+    _start_tunnel(host_name, user, args.password, back_camera_ip, args.device_id, args.pipeline_number)
+    _start_second_tunnel(host_name, user, args.password, front_camera_ip, args.device_id, args.pipeline_number)
 
-    _start_tunnel(ssh_cmd, args.device_id, args.pipeline_number)
     if not _wait_for_tunnel(timeout=30):
         _stop_tunnel(args.device_id, args.pipeline_number)
         print("Failed to establish tunnel", file=sys.stderr)
@@ -547,6 +668,8 @@ def main():
     back_frame_path, front_frame_path, timestamp = _capture_frames_to_folder(
         back_camera_ip,
         front_camera_ip,
+        back_url,
+        front_url,
         CAMERA_FRAME_BASE_PATH,
         user,
         host_name,
