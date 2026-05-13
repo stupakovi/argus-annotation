@@ -4,6 +4,7 @@
 import csv
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -35,7 +36,7 @@ class PipelineConfigToolUI:
         self.root.minsize(960, 640)
 
         self.process: subprocess.Popen[str] | None = None
-        self.output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.output_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.device_id_var = tk.StringVar()
         self.pipeline_number_var = tk.StringVar()
@@ -44,11 +45,18 @@ class PipelineConfigToolUI:
         self.pipeline_summary_var = tk.StringVar(value="Loading pipeline list...")
         self.search_var = tk.StringVar()
         self.grouped_pipeline_data: list[dict[str, object]] = []
+        self._current_output_line = ""
+        self._suppressed_prompt_line = ""
+        self.prompt_dialog: tk.Toplevel | None = None
+        self.prompt_entry_var = tk.StringVar()
+        self.prompt_title_var = tk.StringVar(value="Input requested")
+        self.prompt_desc_var = tk.StringVar(value="")
 
         self._build_ui()
-        self._load_existing_pipelines()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_output_queue)
+        # Load pipeline data after the window appears to keep startup responsive.
+        self.root.after(50, self._load_existing_pipelines)
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root, padding=12)
@@ -65,7 +73,9 @@ class PipelineConfigToolUI:
         search_entry.pack(side="right")
         search_entry.bind("<KeyRelease>", self._apply_search_filter_event)
         ttk.Label(browser_toolbar, text="Search").pack(side="right", padx=(12, 6))
-        ttk.Button(browser_toolbar, text="Refresh", command=self._load_existing_pipelines).pack(side="right")
+        self.refresh_button = ttk.Button(browser_toolbar, text="Refresh", command=self._load_existing_pipelines)
+        self.refresh_button.pack(side="right")
+        self.loading_bar = ttk.Progressbar(browser_toolbar, mode="indeterminate", length=140)
 
         tree_frame = ttk.Frame(browser)
         tree_frame.pack(fill="both", expand=True, pady=(8, 0))
@@ -134,25 +144,10 @@ class PipelineConfigToolUI:
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
 
-        interaction = ttk.LabelFrame(container, text="Interactive Input", padding=12)
-        interaction.pack(fill="x", pady=(12, 0))
-
-        ttk.Label(interaction, text="Send to running process").pack(anchor="w")
-
-        input_row = ttk.Frame(interaction)
-        input_row.pack(fill="x", pady=(6, 0))
-
-        self.input_entry = ttk.Entry(input_row, textvariable=self.input_var)
-        self.input_entry.pack(side="left", fill="x", expand=True)
-        self.input_entry.bind("<Return>", self._send_input_event)
-
-        self.send_button = ttk.Button(input_row, text="Send", command=self._send_input, state="disabled")
-        self.send_button.pack(side="left", padx=(8, 0))
-
-        status_frame = ttk.Frame(container)
-        status_frame.pack(fill="x", pady=(12, 0))
-        ttk.Label(status_frame, text="Status:").pack(side="left")
-        ttk.Label(status_frame, textvariable=self.status_var).pack(side="left", padx=(6, 0))
+        self.status_frame = ttk.Frame(container)
+        self.status_frame.pack(fill="x", pady=(12, 0))
+        ttk.Label(self.status_frame, text="Status:").pack(side="left")
+        ttk.Label(self.status_frame, textvariable=self.status_var).pack(side="left", padx=(6, 0))
 
         output_frame = ttk.LabelFrame(container, text="Output", padding=12)
         output_frame.pack(fill="both", expand=True, pady=(12, 0))
@@ -160,6 +155,94 @@ class PipelineConfigToolUI:
         self.output_text = ScrolledText(output_frame, wrap="word", font=("Consolas", 10))
         self.output_text.pack(fill="both", expand=True)
         self.output_text.configure(state="disabled")
+
+    def _looks_like_input_prompt(self) -> bool:
+        # input() prompts in pipeline_config_tool.py are printed without newline and end with ': '.
+        return bool(re.search(r"[A-Za-z0-9_\-() ]+:\s*$", self._current_output_line))
+
+    def _prompt_description(self, prompt_text: str) -> str:
+        prompt_lower = prompt_text.lower()
+        if "front_camera_ip" in prompt_lower:
+            return "Enter front camera IP address (for example: 192.168.100.101)."
+        if "back_camera_ip" in prompt_lower:
+            return "Enter back camera IP address (for example: 192.168.100.102)."
+        if "gps_coordinates" in prompt_lower:
+            return "Enter GPS coordinates as two numeric values separated by comma (for example: 41.340081, 69.250844)."
+        if "crossroad_name" in prompt_lower or "intersection_address" in prompt_lower:
+            return "Enter intersection/crossroad name."
+        if "direction" in prompt_lower:
+            return "Enter direction text for this pipeline."
+        if "user" in prompt_lower:
+            return "Enter SSH username."
+        if "host_name" in prompt_lower:
+            return "Enter SSH host or IP address."
+        return "The script is requesting additional input."
+
+    def _center_dialog_over_root(self, dialog: tk.Toplevel, width: int = 520, height: int = 180) -> None:
+        self.root.update_idletasks()
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_w = self.root.winfo_width()
+        root_h = self.root.winfo_height()
+
+        x = root_x + max((root_w - width) // 2, 0)
+        y = root_y + max((root_h - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _show_prompt_dialog(self, prompt_text: str) -> None:
+        if self.prompt_dialog and self.prompt_dialog.winfo_exists():
+            self.prompt_title_var.set(prompt_text)
+            self.prompt_desc_var.set(self._prompt_description(prompt_text))
+            self.prompt_dialog.lift()
+            self.prompt_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Interactive Input Required")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        self._center_dialog_over_root(dialog)
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        self.prompt_title_var.set(prompt_text)
+        self.prompt_desc_var.set(self._prompt_description(prompt_text))
+
+        ttk.Label(frame, textvariable=self.prompt_title_var, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.prompt_desc_var, wraplength=460, justify="left").pack(anchor="w", pady=(6, 8))
+
+        prompt_entry = ttk.Entry(frame, textvariable=self.prompt_entry_var, width=60)
+        prompt_entry.pack(fill="x")
+        prompt_entry.bind("<Return>", self._submit_prompt_dialog_input_event)
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill="x", pady=(10, 0))
+        ttk.Button(button_row, text="Submit", command=self._submit_prompt_dialog_input).pack(side="right")
+        ttk.Button(button_row, text="Cancel", command=self._cancel_prompt_dialog).pack(side="right", padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", self._cancel_prompt_dialog)
+
+        self.prompt_dialog = dialog
+        prompt_entry.focus_set()
+
+    def _close_prompt_dialog(self) -> None:
+        if self.prompt_dialog and self.prompt_dialog.winfo_exists():
+            self.prompt_dialog.grab_release()
+            self.prompt_dialog.destroy()
+        self.prompt_dialog = None
+        self.prompt_entry_var.set("")
+
+    def _cancel_prompt_dialog(self) -> None:
+        self._suppressed_prompt_line = self._current_output_line
+        self._close_prompt_dialog()
+
+    def _submit_prompt_dialog_input_event(self, _event: tk.Event) -> None:
+        self._submit_prompt_dialog_input()
+
+    def _submit_prompt_dialog_input(self) -> None:
+        self._send_input(self.prompt_entry_var.get())
 
     def _read_yaml_file(self, path: str) -> dict:
         if not os.path.isfile(path):
@@ -245,18 +328,28 @@ class PipelineConfigToolUI:
         return grouped_list
 
     def _load_existing_pipelines(self) -> None:
-        try:
-            self.grouped_pipeline_data = self._build_grouped_pipeline_data()
-        except FileNotFoundError:
-            self.pipeline_tree.delete(*self.pipeline_tree.get_children())
-            self.pipeline_summary_var.set(f"Deployment map not found: {DEPLOYMENT_MAP_PATH}")
-            return
-        except Exception as exc:
-            self.pipeline_tree.delete(*self.pipeline_tree.get_children())
-            self.pipeline_summary_var.set(f"Failed to load pipelines: {exc}")
-            return
+        self._set_pipeline_loading(True)
+        threading.Thread(target=self._load_existing_pipelines_worker, daemon=True).start()
 
-        self._apply_search_filter()
+    def _set_pipeline_loading(self, is_loading: bool) -> None:
+        if is_loading:
+            self.pipeline_summary_var.set("Loading pipelines...")
+            self.refresh_button.configure(state="disabled")
+            self.loading_bar.pack(side="right", padx=(8, 8))
+            self.loading_bar.start(10)
+        else:
+            self.refresh_button.configure(state="normal")
+            self.loading_bar.stop()
+            self.loading_bar.pack_forget()
+
+    def _load_existing_pipelines_worker(self) -> None:
+        try:
+            grouped_data = self._build_grouped_pipeline_data()
+            self.output_queue.put(("pipelines_loaded", grouped_data))
+        except FileNotFoundError:
+            self.output_queue.put(("pipelines_error", f"Deployment map not found: {DEPLOYMENT_MAP_PATH}"))
+        except Exception as exc:
+            self.output_queue.put(("pipelines_error", f"Failed to load pipelines: {exc}"))
 
     def _group_matches_query(self, group: dict[str, object], query_lower: str) -> bool:
         if not query_lower:
@@ -419,9 +512,11 @@ class PipelineConfigToolUI:
     def _set_running_state(self, is_running: bool) -> None:
         self.run_button.configure(state="disabled" if is_running else "normal")
         self.stop_button.configure(state="normal" if is_running else "disabled")
-        self.send_button.configure(state="normal" if is_running else "disabled")
-        self.input_entry.configure(state="normal" if is_running else "disabled")
         self.status_var.set("Running" if is_running else "Idle")
+        if not is_running:
+            self._close_prompt_dialog()
+            self._current_output_line = ""
+            self._suppressed_prompt_line = ""
 
     def _start_process(self) -> None:
         if self.process and self.process.poll() is None:
@@ -503,19 +598,36 @@ class PipelineConfigToolUI:
                 break
 
             if event_type == "output":
-                self._append_output(payload)
+                text_chunk = str(payload)
+                self._append_output(text_chunk)
+                for ch in text_chunk:
+                    if ch in "\r\n":
+                        self._current_output_line = ""
+                        self._suppressed_prompt_line = ""
+                        self._close_prompt_dialog()
+                    else:
+                        self._current_output_line += ch
+                if self._looks_like_input_prompt():
+                    prompt_text = self._current_output_line.strip()
+                    if prompt_text and prompt_text != self._suppressed_prompt_line:
+                        self._show_prompt_dialog(prompt_text)
             elif event_type == "exit":
                 self._append_output(f"\n[process exited with code {payload}]\n")
                 self.process = None
                 self._set_running_state(False)
+            elif event_type == "pipelines_loaded":
+                self.grouped_pipeline_data = payload if isinstance(payload, list) else []
+                self._apply_search_filter()
+                self._set_pipeline_loading(False)
+            elif event_type == "pipelines_error":
+                self.pipeline_tree.delete(*self.pipeline_tree.get_children())
+                self.pipeline_summary_var.set(str(payload))
+                self._set_pipeline_loading(False)
 
         self.root.after(100, self._poll_output_queue)
 
-    def _send_input_event(self, _event: tk.Event) -> None:
-        self._send_input()
-
-    def _send_input(self) -> None:
-        value = self.input_var.get()
+    def _send_input(self, value: str) -> None:
+        value = value if value is not None else ""
         if not self.process or self.process.poll() is not None or not self.process.stdin:
             return
 
@@ -523,7 +635,10 @@ class PipelineConfigToolUI:
             self.process.stdin.write(value + "\n")
             self.process.stdin.flush()
             self._append_output(f"\n> {value}\n")
-            self.input_var.set("")
+            self.prompt_entry_var.set("")
+            self._close_prompt_dialog()
+            self._current_output_line = ""
+            self._suppressed_prompt_line = ""
         except Exception as exc:
             messagebox.showerror("Failed to Send Input", str(exc))
 
@@ -538,6 +653,7 @@ class PipelineConfigToolUI:
             messagebox.showerror("Failed to Stop", str(exc))
 
     def _on_close(self) -> None:
+        self._close_prompt_dialog()
         if self.process and self.process.poll() is None:
             if not messagebox.askyesno("Exit", "A process is still running. Stop it and close?"):
                 return
@@ -548,7 +664,6 @@ class PipelineConfigToolUI:
 def main() -> None:
     root = tk.Tk()
     app = PipelineConfigToolUI(root)
-    app.input_entry.configure(state="disabled")
     root.mainloop()
 
 
