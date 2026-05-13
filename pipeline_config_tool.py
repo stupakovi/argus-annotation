@@ -14,6 +14,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -81,6 +82,20 @@ def _sanitize_ascii_or_prompt(value: str, prompt_text: str) -> str:
     return _prompt_ascii(prompt_text)
 
 
+def _strip_gps_parentheses(value: str) -> str:
+    """Remove surrounding parentheses and extra whitespace from GPS coordinates."""
+    stripped = (value or "").strip()
+    if stripped.startswith("(") and stripped.endswith(")"):
+        stripped = stripped[1:-1].strip()
+    return stripped
+
+
+def _load_gps_from_config(value: str) -> str:
+    """Load GPS from config without validation; strip parentheses if present."""
+    stripped = _strip_gps_parentheses(value)
+    return stripped
+
+
 def _sanitize_gps_or_prompt(value: str, prompt_text: str) -> str:
     """Use existing GPS value if valid; otherwise ask interactively."""
     sanitized = (value or "").strip()
@@ -91,6 +106,44 @@ def _sanitize_gps_or_prompt(value: str, prompt_text: str) -> str:
         "Please enter two numeric values separated by comma."
     )
     return _prompt_gps(prompt_text)
+
+
+def _find_existing_pipeline(device_id: str, pipeline_number: int) -> tuple:
+    """
+    Search for any existing pipeline with the same device_id.
+    Returns (user, host_name, intersection_address, gps_coordinates, pipeline_config_path)
+    or (None, None, None, None, None) if not found.
+    """
+    try:
+        with open(DEPLOYMENT_MAP_PATH, newline="", encoding="utf-8") as fh:
+            # Skip leading sep= line if present
+            first_line = fh.readline()
+            if not first_line.lower().startswith("sep="):
+                fh.seek(0)
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if row["device_id"] == device_id:
+                    # Found a pipeline for this device_id
+                    user = row["user"]
+                    host_name = row["host_name"]
+                    pipeline_config_file_name = row["pipeline_config_file_name"]
+                    pipeline_config_path = os.path.join(CONFIGS_PATH, pipeline_config_file_name)
+                    
+                    # Load intersection_address and gps_coordinates from config
+                    intersection_address = ""
+                    gps_coordinates = ""
+                    if os.path.isfile(pipeline_config_path):
+                        with open(pipeline_config_path, "r", encoding="utf-8") as pf:
+                            pipeline_cfg = yaml.safe_load(pf)
+                        fixation_block = pipeline_cfg.get("fixation", {})
+                        intersection_address = fixation_block.get("intersection_address", "")
+                        gps_coordinates = _load_gps_from_config(fixation_block.get("gps_coordinates", ""))
+                    
+                    return user, host_name, intersection_address, gps_coordinates, pipeline_config_path
+    except FileNotFoundError:
+        pass
+    
+    return None, None, None, None, None
 
 
 def _read_pid(path: str):
@@ -329,7 +382,7 @@ def main():
                         fixation_block = pipeline_cfg.get("fixation", {})
                         intersection_address = fixation_block.get("intersection_address", "")
                         direction = fixation_block.get("direction", "")
-                        gps_coordinates = fixation_block.get("gps_coordinates", "")
+                        gps_coordinates = _load_gps_from_config(fixation_block.get("gps_coordinates", ""))
                     else:
                         print(
                             f"Pipeline config file not found: {pipeline_config_path}",
@@ -340,14 +393,17 @@ def main():
                         back_camera_ip = _prompt_required("back_camera_ip: ")
                         intersection_address = _prompt_required("crossroad_name (intersection_address): ")
                         direction = _prompt_required("direction: ")
-                        gps_coordinates = _prompt_required("gps_coordinates: ")
+                        gps_coordinates = _prompt_gps("gps_coordinates: ")
 
                     intersection_address = _sanitize_ascii_or_prompt(
                         intersection_address,
                         "crossroad_name (intersection_address): ",
                     )
                     direction = _sanitize_ascii_or_prompt(direction, "direction: ")
-                    gps_coordinates = _sanitize_gps_or_prompt(gps_coordinates, "gps_coordinates: ")
+                    # For GPS: only validate if from user input (not from config)
+                    # Prompt if empty, validate the prompted input
+                    if not gps_coordinates.strip():
+                        gps_coordinates = _prompt_gps("gps_coordinates: ")
 
                     print(f"front_camera_ip:           {front_camera_ip}")
                     print(f"back_camera_ip:            {back_camera_ip}")
@@ -426,25 +482,43 @@ def main():
         f"Deployment map record not found for device_id={args.device_id!r}, pipeline_number={args.pipeline_number}.",
         file=sys.stderr,
     )
-    print("Please provide required values one by one.")
+    
+    # Try to find an existing pipeline for this device_id
+    found_user, found_host_name, found_intersection_address, found_gps_coordinates, found_config_path = _find_existing_pipeline(args.device_id, args.pipeline_number)
+    
+    if found_user:
+        print(f"Found existing pipeline for device_id={args.device_id!r}.")
+        print(f"Reusing: user={found_user}, host_name={found_host_name}")
+        print(f"         intersection_address={found_intersection_address}, gps_coordinates={found_gps_coordinates}")
+        print("Please provide only front_camera_ip, back_camera_ip, and direction.")
+        
+        user = found_user
+        host_name = found_host_name
+        intersection_address = found_intersection_address
+        gps_coordinates = found_gps_coordinates
+    else:
+        print("Please provide required values one by one.")
+        # Values normally taken from deployment map
+        user = _prompt_required("user: ")
+        host_name = _prompt_required("host_name: ")
+        # Values normally extracted from pipeline config
+        intersection_address = _prompt_required("crossroad_name (intersection_address): ")
+        gps_coordinates = _prompt_gps("gps_coordinates: ")
+        
+        intersection_address = _sanitize_ascii_or_prompt(
+            intersection_address,
+            "crossroad_name (intersection_address): ",
+        )
+        # For GPS: only validate if from user input (not from config)
+        if not gps_coordinates.strip():
+            gps_coordinates = _prompt_gps("gps_coordinates: ")
 
-    # Values normally taken from deployment map
-    user = _prompt_required("user: ")
-    host_name = _prompt_required("host_name: ")
-
-    # Values normally extracted from pipeline config
+    # Always prompt for camera IPs and direction
     front_camera_ip = _prompt_required("front_camera_ip: ")
     back_camera_ip = _prompt_required("back_camera_ip: ")
-    intersection_address = _prompt_required("crossroad_name (intersection_address): ")
     direction = _prompt_required("direction: ")
-    gps_coordinates = _prompt_required("gps_coordinates: ")
 
-    intersection_address = _sanitize_ascii_or_prompt(
-        intersection_address,
-        "crossroad_name (intersection_address): ",
-    )
     direction = _sanitize_ascii_or_prompt(direction, "direction: ")
-    gps_coordinates = _sanitize_gps_or_prompt(gps_coordinates, "gps_coordinates: ")
 
     print(f"user:                      {user}")
     print(f"host_name:                 {host_name}")
